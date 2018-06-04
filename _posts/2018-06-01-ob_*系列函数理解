@@ -3,7 +3,7 @@ layout:     post
 title:      ob_*系列函数理解
 subtitle:   ob_end_flush和ob_flush和flush的理解
 date:       2018-06-04
-author:     
+author:     Enboo
 header-img: img/post-bg-ios9-web.jpg
 catalog: true
 tags:
