@@ -1,0 +1,244 @@
+---
+layout:     post
+title:      ob_*系列函数理解
+subtitle:   ob_end_flush和ob_flush和flush的理解
+date:       2018-06-04
+author:     
+header-img: img/post-bg-ios9-web.jpg
+catalog: true
+tags:
+    - php
+    - 函数
+    - ob
+    - 多级缓冲
+---
+
+
+# 前言
+
+*摘要：ob_flush/flush在手册中的描述, 都是什么刷新输出缓冲区, 并且还需要配套使用, 会导致很多人迷惑*
+
+
+所有的php程序员都知道在php脚本里面执行 echo “1”;访客的浏览器里面就会显示“1”。
+
+但是我们执行下面的代码的时候，并不是显示“1”之后5秒再显示“2”，而是等待5秒后直接显示“12”
+```
+echo '1';
+sleep(5);
+echo '2';
+```
+原因就在于当我们完成一次请求并从服务器取的数据显示在浏览器页面时，数据其实经过了两层数据 buffer
+
+1、php 自己的数据 buffer（默认 1024 * 4 Bytes），操作函数以 ob_* 开头的系列函数
+
+2、web服务器的数据 buffer：apache 是调用系统内核的 tcp buffer 模块（默认 1024 * 4 Bytes）
+   nginx 为自己的 fastcgi_buffer_size（参数配置）
+
+当我们调用 echo 等输出数据时，数据并不会被立即返回给浏览器，php 会将其缓存到自身的 buffer 中，而后冲出至 tcp buffer 中，最后才是输出至浏览器。
+
+==另外要强调的一点是，php 对每次请求都会自动的开启一个 buffer #800000==，这个 buffer 的大小为 php 的配置项：
+output_buffering（如果我们手动调用的 ob_start 函数，则我们手动开启的 buffer size 是没有限制的）。
+当 php 缓存的数据大于这个参数时，php 会把数据输出到 tcp buffer 中，tcp buffer 也会根据当前缓存区数据大小决定是否输出到浏览器。
+  <table>
+  <tr><td bgcolor=orange>
+  program data   >>    php buffer    >>   tcp buffer   >>   client
+  </td></tr>
+  </table>
+  
+  <table>
+    <tr><td bgcolor=orange>
+    echo、print => php output_buffering => webServer buffer => browser buff => browser display
+    </td></tr>
+    </table>
+  即：脚本输出 => php的缓冲区设置 => 系统的缓冲区设置(apache、nginx) => 浏览器的缓冲区设置 => 显示给用户
+  
+```
+<?php
+
+for($i = 1; $i <= 10; $i ++) {
+    //填满PHP自带缓冲区（默认4096 byte）
+    echo str_repeat(" ", 4096);
+    //只要超过4096 byte就全部输出到apache缓存区
+    echo $i;
+    //apache缓存区也有4096 byte，接收超过了4096 byte，全部发送到浏览器
+    sleep(1);
+}
+```
+如按上边所说，浏览器每隔1秒会输出一个数字，条件是web buffer是4096 byte，当然实际当中win环境下的buffer可能大于4096 byte，
+但也无妨理解，如：
+```
+<?php
+
+for($i = 1; $i <= 10; $i ++) {
+    //填满PHP自带缓冲区（默认4096 byte）
+    echo str_repeat(" ", 4096 * 2);
+    //溢出全部，只要超过4096这个值就全部输出到apache缓存区，相当于ob_flush函数
+    echo $i;
+    //apache缓存区也有4096 byte(或者更大)，接收超过了4096，发送到浏览器，相当于flush函数
+    //浏览器IE是256byte，Chrome是1000byte，存大于1000 byte数据后，直接输出
+    sleep(1);
+}
+```
+那么如何实现不用空格填充强制输出呢，就是本文要讲的核心
+```
+<?php
+//这1000个是浏览器缓存塞满
+echo str_repeat(" ", 1000);
+for($i = 1; $i <= 10; $i ++) {
+echo $i;
+ob_flush();
+flush();
+sleep(1);
+}
+```
+flush()
+
+==flush() 函数是将 tcp buffer 数据强制输出到客户端，而非等缓冲区满后自动输出。==tcp buffer 的默认值是 4KB，也就是说在数据未缓冲满时是不会发送给客户端的，直至脚本执行结束。如果脚本仍在执行中，缓冲区已满，则会将数据输出到浏览器。我们可以通过 flush() 函数将 tcp buffer 的数据强制输出到浏览器。
+
+ob_flush()
+
+==将当前 php 缓冲区的内容输出到 tcp buffer （假设当前缓冲区为一级缓冲区），而不等待缓冲区填满。==所以调用顺序应为 ob_flush 到 tcp buffer，再 flush 到浏览器。
+
+ob_start()
+
+==开启大小无限制的缓冲区（php 默认开启的缓冲区是受 output_buffering 限制的）==，所以如果你不手动的 ob_flush/ob_end_flush 的话php是不会把数据输出给 tcp buffer 的，这点要注意。
+
+#进阶
+* ob_clean — 清空（擦掉）输出缓冲区
+* ob_end_clean — 清空（擦除）缓冲区并关闭输出缓冲
+* ob_end_flush — 冲刷出（送出）输出缓冲区内容并关闭缓冲
+* ob_flush — 冲刷出（送出）输出缓冲区中的内容
+* ob_start — 打开输出控制缓冲
+
+通常来说，ob_* 最常用的用法组合是这样：
+```
+<?php
+
+ob_start();
+echo '...';
+$content = ob_get_contents();
+
+// 清除并关闭缓存，否则会输出到屏幕
+ob_end_clean();
+
+// 然后自由处理 $content ...
+```
+注：ob_end_* 必须在缓冲区内调用，即必须要有 ob_start 才能 ob_end_*。
+
+##ob_start 嵌套
+```
+<?php
+
+ob_start();
+echo 'A' . PHP_EOL;
+ob_start();
+echo 'B' . PHP_EOL;
+ob_start();
+echo 'C' . PHP_EOL;
+ob_end_clean();
+ob_end_flush();
+ob_end_clean();
+```
+结果是什么没有输出，为什么？
+
+每次 ob_start() 都会新建一个缓冲区，PHP 程序本身也有一个最终的输出缓冲区，我们把他叫做F。
+
+步骤解释：
+```
+// 初始 F:空
+
+// 新建缓冲区A
+// 此时缓存区内容为 F:空, A:空,
+ob_start();
+
+// 此时缓存区内容为 F:空, A:'level A'
+echo 'level A';
+
+// 新建缓冲区B
+// 此时缓存区内容为 F:空, A:'level A', B:空
+ob_start();
+
+// 此时缓存区内容为 F:空, A:'level A', B:'level B'
+echo 'level B';
+
+// 新建缓冲区C
+// 此时缓存区内容为 F:空, A:'level A', B:'level B', C:空
+ob_start();
+
+// 此时缓存区内容为 F:空, A:'level A', B:'level B', C:'level C'
+echo 'level C';
+
+// 缓冲区C被清空并关闭
+// 此时缓存区内容为 F:空, A:'level A', B:'level B'
+ob_end_clean();
+
+// 缓冲区B输出到上一级的缓冲区A并关闭
+// 此时缓存区内容为 F:空, A:'level A level B'
+ob_end_flush();
+
+// 缓冲区A被清空并关闭
+// 此时缓冲区A里的内容还没真正输出到最终的F中，因此整个程序也就没有任何输出
+ob_end_clean();
+```
+flush 和 ob_flush 的区别
+1、ob_flush 刷新 PHP 自身的缓冲区 2、flush 只有在 PHP 做为 Apache Module 安装时, 才有实际作用. 它是刷新 WebServer (Apache) 的缓冲区
+
+正确使用俩者的顺序是：先 ob_flush，再 flush。
+
+在其他 sapi 下，不调用 flush 也可以。但为了保证代码可移植性，建议配套使用。
+
+#常见问题
+###php buffer
+php运行的结果先放入缓冲区（buffer），只有当缓冲区满了或者php运行完毕，才将数据输出去。
+缓冲区是通过php.ini中的output_buffering变量控制。output_buffering的默认值是off，可以设置大于0的数值来打开buffer。具体介绍
+但是这里需要注意的是：
+1）使用ini_set是无法修改buffer的设置。
+2）不管php.ini中output_buffering设置，cli模式下的php始终默认是output buffering为关闭的。但是你可以通过ob_start()将buffer打开。
+大家都说：ob_start()是将php buffer打开，ob_end_flush()是将php buffer关闭。需要注意的是php.ini中php buffer是关闭的，再次调用ob_end_flush()会报warning。
+
+###webServer buffer
+这里主要讲apache和nginx的缓冲区。
+1、apache buffer
+当php的输出数据给apache服务器时，它也会做一层buffer（也将数据放入它的缓冲区，当缓冲区数据满或执行完毕时，才输出数据）。
+若想关闭缓冲区，可以在php层使用flush()来强制将缓冲区数据输出。
+fulsh() 的工作原理：在apache module的sapi下, flush会通过调用sapi_module的flush成员函数指针, 间接的调用apache的api: ap_rflush刷新apache的输出缓冲区, 当然手册中也说了, 有一些apache的其他模块, 可能会改变这个动作的结果.例如mod_gzip，可能自己进行输出缓冲区，这将导致flush()函数产生的结果不会立即被发送到客户端浏览器。
+
+
+
+2、nginx buffer
+
+nginx使用fastcgi缓冲区来缓冲数据。很遗憾的是，fastcgi是强制将buffer打开的，无法关闭缓冲区。
+有人有可能会想，无法关闭可以将buffer设置的足够小，来使缓冲数据输出，达到无缓冲的效果。但是这个想法无法实现。
+原因一：fastcgi buffer无法识别小于1k的数值。
+原因二：受参数之间大小关系的影响。
+
+具体可以看看fastcgi的一些buffer设置。
+fastcgi_buffer_size：用来存储response的header数据。
+fastcgi_buffers：用来存储response的内容数据.
+fastcgi_busy_buffers_size：用来控制同时传输到客户端的buffer数量。一旦fastcgi_buffers设置的 buffer被写入，直到buffer里面的数据被完整的传输完（传输到客户端），这些buffer将会一直处在busy状态，我们不能对这些 buffer进行任何别的操作。所有处在busy状态的buffer size加起来不能超过fastcgi_busy_buffers_size。
+
+参数之间大小关系：
+fastcgi_busy_buffers_size < (all fastcgi_buffers – one buffer) 并且fastcgi_busy_buffers_size>=max (fastcgi_buffer_size, one fastcgi _buffers)。
+例如,在nginx.conf配置中有:
+fastcgi_buffers 4 128k
+fastcgi_buffer_size 256k
+那么fastcgi_busy_buffers_size<(4*128k – 4k) 并且fastcgi_busy_buffers_size>=max(256k, 128k)
+其中，4k（one buffer的大小）是linux系统默认的缓存大小，即一个内存页。
+若fastcgi_buffer_size设置的很小，会导致header过小的错误。你也同样无法保证设置的值会满足所有的情况。
+
+要注意的是：
+flush, 严格来讲, 这个只有在PHP做为apache的Module(handler或者filter)安装的时候, 才有实际作用. 它是刷新WebServer(可以认为特指apache)的缓冲区.所以在nginx下，flush()函数是无法起作用的。
+
+###browser buffer
+IE为256Bytes, Chrome与FireFox为1000Bytes,只有输出数据达到了这个长度或者脚本结束浏览器才会将数据输出在页面上。
+在 php端无法关闭浏览器buffer。
+为了使得数据及时输出，可以在发送真正内容 数据前，发送一些空格来填满浏览器的buffer。
+浏览器的buffer一满，就会将其他新输出的数据输出。
+但是不同的浏览器会设置不同的buffer大小。
+为了保险期间，可以发送4096个空格，因为目前比较流行的浏览器的buffer还没有超过4k(一个内页大小)。
+
+#参考博文
+>[参考博文1:PHP flush 和 ob_flush 的机制及详解](https://my.oschina.net/sallency/blog/887886)
+>[参考博文2:PHP 中 ob_* 系列函数的一些理解](http://silverd.cn/2017/01/09/php-ob-funcs.html)
+>[参考博文3:从php到浏览器的缓存机制，不得不看！](https://www.cnblogs.com/godok/p/6341300.html)
+>[参考博文4:PHP输出缓冲](http://blog.yuan-chuang.com/article-index-id-9-cid-4.html)
